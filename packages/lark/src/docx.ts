@@ -8,7 +8,13 @@ import {
   OneHundred,
   Second,
 } from '@dolphin/common'
-import { toMarkdown, type Options } from 'mdast-util-to-markdown'
+import {
+  toMarkdown,
+  type Info,
+  type Options,
+  type State,
+  type Unsafe,
+} from 'mdast-util-to-markdown'
 import { gfmStrikethroughToMarkdown } from 'mdast-util-gfm-strikethrough'
 import { gfmTaskListItemToMarkdown } from 'mdast-util-gfm-task-list-item'
 import { gfmTableToMarkdown } from 'mdast-util-gfm-table'
@@ -891,9 +897,7 @@ export class Transformer {
       children
         .map(child => {
           if (child.type === BlockType.GRID) {
-            return flatChildren(
-              child.children.map(column => column.children).flat(1),
-            )
+            return [child]
           }
 
           if (
@@ -905,7 +909,8 @@ export class Transformer {
             child.type === BlockType.HEADING6 ||
             child.type === BlockType.HEADING7 ||
             child.type === BlockType.HEADING8 ||
-            child.type === BlockType.HEADING9
+            child.type === BlockType.HEADING9 ||
+            child.type === BlockType.TEXT
           ) {
             return [child, ...flatChildren(child.children)]
           }
@@ -1121,6 +1126,67 @@ export class Transformer {
 
         return this.normalizeImage(image)
       }
+      case BlockType.GRID: {
+        const table: mdast.Table = { type: 'table', children: [] }
+        const rows: mdast.TableRow[] = []
+
+        const columnCount = block.children.length // grid_column
+        // const rowCount = Math.max(...block.children.map(column => column.children.length))
+
+        // for (let rowIndex = 0; rowIndex < rowCount; rowIndex++) {
+        const cells: mdast.TableCell[] = []
+
+        for (let colIndex = 0; colIndex < columnCount; colIndex++) {
+          const grid_column = block.children[colIndex]
+
+          const cell: mdast.TableCell = { type: 'tableCell', children: [] }
+
+          const transformedCell = this.transformParentBlock(
+            grid_column,
+            () => cell,
+            nodes => {
+              const normalizedNodes = mergeListItems(nodes)
+                .map((node, i, arr) => {
+                  const children =
+                    node.type === 'paragraph' ? node.children : [node]
+                  return i === arr.length - 1
+                    ? children
+                    : [
+                        ...children,
+                        { type: 'text', value: '<br>' } as mdast.Text,
+                      ]
+                })
+                .flat(1)
+
+              if (normalizedNodes.every(isPhrasingContent)) {
+                return normalizedNodes
+              }
+
+              cell.data = {
+                invalidChildren: normalizedNodes,
+              }
+
+              return normalizedNodes.filter(isPhrasingContent)
+            },
+          )
+
+          cells.push(transformedCell)
+        }
+
+        rows.push({ type: 'tableRow', children: cells })
+        // }
+
+        table.children = rows
+
+        // 标记是否有无效单元格
+        table.data = {
+          invalid: table.children.some(row =>
+            row.children.some(cell => cell.data?.invalidChildren),
+          ),
+        }
+
+        return table
+      }
       case BlockType.TABLE: {
         let table: mdast.Table = { type: 'table', children: [] }
 
@@ -1264,6 +1330,21 @@ export class Docx {
     return toMarkdown(root, {
       ...options,
       extensions: [
+        {
+          handlers: {
+            root(node: mdast.Root, _, state: State, info: Info) {
+              state.unsafe = state.unsafe.filter(
+                (item: Unsafe) =>
+                  !(
+                    item.character === ' ' &&
+                    item.inConstruct?.includes('codeFencedLangGraveAccent') &&
+                    item.inConstruct.includes('codeFencedLangTilde')
+                  ),
+              )
+              return state.containerFlow(node, info)
+            },
+          },
+        },
         gfmStrikethroughToMarkdown(),
         gfmTaskListItemToMarkdown(),
         gfmTableToMarkdown(),
